@@ -477,7 +477,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
       // it (issue #325, floor-stale.ts) instead of skipping the floor entirely —
       // the skip dropped the meter onto the undercounting estimate (~70-80K low)
       // and the next fresh reading snapped it back into the emergency band.
-      const { predates, netReclaimed, fresh, lastRealTokens } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
+      const { predates, netReclaimed, fresh, lastRealTokens, trustedCeiling } = compressionAnchorStaleness(entries, state.blocks, defaultCountTokens);
       // issue #600: when the previous model turn yielded no fresh provider usage
       // (errored / aborted / zero-usage — e.g. a network "fetch failed"), the host's
       // getContextUsage() has no anchor and reports the raw session-tree total
@@ -495,7 +495,22 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
        if (!fresh && lastRealTokens > 0 && reportedHost > 0) {
         logInfo("turn", { sid, event: "host-tree-sum-rejected", reported: reportedHost, flooredAt: lastRealTokens });
       }
-      const hostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
+      const rawHostFloor = realPromptTokens > 0 ? Math.max(0, realPromptTokens - (predates ? netReclaimed : 0)) : 0;
+      // issue #595: after a retry's context_edit the host abandons its provider
+      // usage anchor and reports a full-history fallback estimate (re-including
+      // ACP-folded content) — irreducibly larger than the compressed send view,
+      // which floored the meter into a false EMERGENCY (78k → 326k). Cap the floor
+      // at the measured anchor + trailing (+ images): an upper bound on the true
+      // request size, so the fallback estimate may raise the floor only as far as
+      // a real provider reading could. Genuine growth moves both sides together;
+      // with no anchor the prior behavior is untouched. On non-fresh turns (#600)
+      // the cap is a no-op: the meter already floors at lastRealTokens ≤ ceiling.
+      const imageTokenSum = [...imageTokens.values()].reduce((a, b) => a + b, 0);
+      const hostCeiling = trustedCeiling > 0 ? trustedCeiling + imageTokenSum : 0;
+      const hostFloor = hostCeiling > 0 ? Math.min(rawHostFloor, hostCeiling) : rawHostFloor;
+      if (hostFloor < rawHostFloor) {
+        logWarn("turn", { sid, event: "host-floor-capped", reason: "host-fallback-estimate", raw: rawHostFloor, capped: hostFloor, anchor: lastRealTokens, ceiling: hostCeiling, view: sentTokens });
+      }
       // Calibration anchor (issue #455): the estimate carries systematic phantom
       // mass (content counted locally that never goes on the wire) which the
       // raise-only floors below can never pull down — in #452 the meter ran
@@ -920,6 +935,28 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime, standDownIf
         rebuilt = sanitized.messages;
         logWarn("tool-pair-sanitize", { sid, event: "dropped-orphan-results", count: sanitized.droppedResults.length, droppedResults: sanitized.droppedResults });
       }
+    }
+
+    // pi-ai's max_tokens clamp reads this exact `rebuilt` list via
+    // estimateContextTokens. Its "last assistant usage" anchor is STALE after a
+    // compaction: that usage was measured pre-compaction (full thread), and the
+    // injected summaries carry no timestamp, so usageAppliesToPrefix never
+    // invalidates it -> estimate ~= full thread -> max_tokens=1 (a local
+    // llama.cpp server then ends every reply after one token). A fresh timestamp
+    // before the first assistant invalidates every stale anchor, forcing pi-ai's
+    // accurate char-based estimate of the pruned list. Gated on an ACTIVE
+    // compaction so ordinary turns keep the (accurate) real-usage anchor.
+    if (turn.state.blocks.some((b) => b.active)) {
+      // Deterministic fresh timestamp: max existing + 1 (NOT Date.now(), which
+      // would break the "byte-identical across restart" invariant). Fresh enough
+      // to invalidate every stale anchor, stable across runs/restarts.
+      const maxTs = rebuilt.reduce((m, msg) => Math.max(m, msg.timestamp ?? 0), 0);
+      rebuilt.unshift({
+        role: "user",
+        content: [{ type: "text", text: "[acp] compaction active — context re-estimated" }],
+        timestamp: maxTs + 1,
+      } as AgentMessage);
+      logInfo("stale-anchor-invalidate", { sid, outMsgs: rebuilt.length });
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
