@@ -8,6 +8,30 @@ master (v0.1.83), built with `npm ci && npm run build` (dist is self-contained:
 by pi's loader to its own install tree). Replaces the previous proxy-based
 `billion-context` install (moved to `~/.pi/agent/deprecated/extensions/billion-context/`).
 
+## Fork notes — changes vs upstream
+
+This is a **fork of [ranxianglei/billion-context-pi](https://github.com/ranxianglei/billion-context-pi)**
+(upstream `master`, v0.1.83).
+
+- **upstream** → `https://github.com/ranxianglei/billion-context-pi.git`
+- **origin (this fork)** → `https://github.com/meviang/billion-context-pi.git`
+
+Everything below is a local change on top of upstream `master`; nothing has been sent
+upstream.
+
+| File | Change |
+|---|---|
+| `src/index.ts` | **Stale-anchor invalidation marker** (fixes `max_tokens=1`, see *How it works*) + host-floor-fallback debug event |
+| `src/floor-stale.ts` | `hostFreshnessGate` / `isStaleHostFloor` (new); `hostFloorGate` → `hostFloorFreshnessGate` (renamed) |
+| `package.json` | `@earendil-works/pi-agent-core` `0.0.x → 0.0.14` |
+| `tests/floor-stale.test.ts` | tests for `isStaleHostFloor` + the rename |
+| `tests/host-floor-fallback.test.ts` | new — host-floor-fallback event test |
+| `README.md` | rewritten for local use (303 → 68 lines) + stale-anchor bullet |
+
+**Verification:** `npm run typecheck` clean; `npm test` 1072/1075 pass (3 skipped).
+Direct `estimateContextTokens` check on a ~50K pruned list with a stale anchor: no
+marker → est ≈ 165K → `max_tokens=1`; with marker → est ≈ 50K → `max_tokens=8192`.
+
 ## What it provides
 
 - `compress` — fold a message range (by `mNNNNN` refs) into a summary block
@@ -47,9 +71,11 @@ by pi's loader to its own install tree). Replaces the previous proxy-based
 
 ## Configuration
 
-- `~/.pi/acp.json`: `{ "delegate": false }` — disables `acp_delegate*` because the
-  local `subagents` extension is the delegation path (two delegation tools make
-  the model's choice noisier). Compression tools are unaffected.
+- `~/.pi/acp.json`: `{ "delegate": { enabled: true, maxConcurrent: 1, agents: … } }`
+  — `acp_delegate*` is the delegation path (the local `subagents` extension was
+  removed 2026-11-16). `maxConcurrent: 1` caps background delegates; all 5 roles
+  default to `llama-pc/qwen3.8-27b` + `thinkingLevel: medium`. Compression tools
+  are unaffected.
 - Logs: `~/.pi/acp.log` (rotates at 10 MB).
 
 ## Dependencies
